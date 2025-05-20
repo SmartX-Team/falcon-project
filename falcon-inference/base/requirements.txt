@@ -1,0 +1,11 @@
+# torch==2.2.0+cu124 # CUDA 12.4 wheels - 이 부분은 nvidia/cuda:12.4.1 이미지에 맞는 PyTorch 설치 권장
+# PyTorch는 https://pytorch.org/get-started/locally/ 에서 환경에 맞는 설치 명령어 확인
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch==2.2.0+cu121 # CUDA 12.1용 PyTorch (CUDA 12.4 런타임과 일반적으로 호환) 또는 cu124 명시
+ultralytics==8.2.1
+opencv-python-headless==4.10.0.82
+onnxruntime-gpu==1.17.0  # UniDepth ONNX 추론용 (CUDA EP 사용)
+kafka-python==2.0.2      # Kafka 소비·발행
+numpy==1.26.4
