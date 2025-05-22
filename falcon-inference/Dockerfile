@@ -58,3 +58,9 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 # 작업 디렉토리 설정
 WORKDIR /app
+
+COPY ./app /app 
+
+
+# 5) 컨테이너 실행 시 실행될 명령어
+CMD ["python3", "inference_main.py"]
