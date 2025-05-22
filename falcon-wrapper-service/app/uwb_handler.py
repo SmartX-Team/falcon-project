@@ -3,12 +3,13 @@ import time
 import logging
 from datetime import datetime, timezone
 import requests
-from .config import app_config # UWB_GATEWAY_URL, UWB_API_KEY, UWB_API_TIMEOUT_SEC 사용
+from typing import Optional, Dict
+from config import app_config # UWB_GATEWAY_URL, UWB_API_KEY, UWB_API_TIMEOUT_SEC 사용
 
 logger = logging.getLogger(__name__)
 
 class UWBHandler:
-    def __init__(self, camera_id: str, tag_id_for_camera: str | None):
+    def __init__(self, camera_id: str, tag_id_for_camera: Optional[str]):
         self.camera_id = camera_id
         self.tag_id = tag_id_for_camera
         self.uwb_gateway_url = app_config.UWB_GATEWAY_URL
@@ -20,7 +21,7 @@ class UWBHandler:
         else:
             logger.info(f"[{self.camera_id}] UWBHandler initialized. No Tag ID configured for this camera. UWB data will not be fetched.")
 
-    def get_uwb_data(self) -> dict | None:
+    def get_uwb_data(self) -> Optional[Dict]:
         if not self.tag_id or not self.uwb_gateway_url:
             return None 
 
@@ -96,11 +97,13 @@ class UWBHandler:
         except requests.exceptions.RequestException as e:
             logger.warning(f"[{self.camera_id}] UWB fetch failed for tag {self.tag_id} (RequestException): {e}")
         except json.JSONDecodeError as e_json:
-            logger.warning(f"[{self.camera_id}] UWB API response for tag {self.tag_id} not valid JSON: {e_json}. Response text (first 200 chars): {response.text[:200] if 'response' in locals() and hasattr(response, 'text') else 'N/A'}")
+            # response_obj가 정의되었는지 확인 후 사용
+            response_text_snippet = response_obj.text[:200] if response_obj and hasattr(response_obj, 'text') else 'N/A'
+            logger.warning(f"[{self.camera_id}] UWB API response for tag {self.tag_id} not valid JSON: {e_json}. Response text (first 200 chars): {response_text_snippet}")
         except Exception as e_other:
             logger.error(f"[{self.camera_id}] Unexpected error fetching or parsing UWB for tag {self.tag_id}: {e_other}", exc_info=True)
         
-        return None # 오류 발생 또는 데이터 없음
+        return None
 
     def shutdown(self):
         logger.info(f"[{self.camera_id}] Shutting down UWBHandler for tag {self.tag_id or 'N/A'}...")
