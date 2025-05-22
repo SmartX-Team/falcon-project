@@ -69,7 +69,7 @@ class UWBHandler:
                         pos_y_val = current_value
                         if pos_timestamp_utc is None or current_ts_dt > pos_timestamp_utc:
                              pos_timestamp_utc = current_ts_dt
-                    elif stream_id == "posZ": # Z축 값도 가져옴 (그러나 README: GIST AI Grad Building에서 일정하다고 가정)
+                    elif stream_id == "posZ": # Z축 값도 가져옴 (그러나 README: GIST AI Grad Building에서 일정하다고 가정 실제 사용은 안함)
                         pos_z_val = current_value 
                         # Z의 타임스탬프도 고려할 수 있으나, 보통 X,Y와 함께 업데이트됨
                     elif stream_id == "numberOfAnchors": # 예시로 품질 지표로 사용

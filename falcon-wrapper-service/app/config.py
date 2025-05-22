@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class AppConfig:
     # Kafka 설정
-    KAFKA_BOOTSTRAP_SERVERS: list[str] = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
+    KAFKA_BOOTSTRAP_SERVERS: list[str] = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', '10.79.1.1:9094').split(',')
     OUTPUT_KAFKA_TOPIC: str = os.environ.get('OUTPUT_KAFKA_TOPIC', 'fused_input_for_inference')
     KAFKA_PRODUCER_MAX_REQUEST_SIZE: int = int(os.environ.get('KAFKA_PRODUCER_MAX_REQUEST_SIZE', 5 * 1024 * 1024))
     KAFKA_CONSUMER_TIMEOUT_MS: int = int(os.environ.get('KAFKA_CONSUMER_TIMEOUT_MS', 1000))
@@ -34,6 +34,25 @@ class AppConfig:
     FRAME_PROCESSOR_WORKERS: int = int(os.environ.get('FRAME_PROCESSOR_WORKERS', 2))
 
     WRAPPER_INSTANCE_ID: str = os.environ.get('WRAPPER_INSTANCE_ID', f"wrapper-{uuid.uuid4().hex[:6]}")
+
+    # Redis Configuration for Dynamic Sources
+    REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+    REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
+    REDIS_DB_CONFIGS = int(os.environ.get("REDIS_DB_CONFIGS", 0)) # 서비스 설정을 읽어올 Redis DB 번호
+    REDIS_SERVICE_CONFIG_KEY_PATTERN = os.environ.get("REDIS_SERVICE_CONFIG_KEY_PATTERN", "service_configs:*")
+    REDIS_POLLING_INTERVAL_SEC = int(os.environ.get("REDIS_POLLING_INTERVAL_SEC", 60)) # 60초마다 폴링
+
+    DEFAULT_UWB_HANDLER_TYPE = os.environ.get("DEFAULT_UWB_HANDLER_TYPE", "postgresql").lower() # 'postgresql' or 'api'
+
+    # UWB PostgreSQL Database Configuration
+    POSTGRES_HOST_UWB = os.environ.get("POSTGRES_HOST_UWB", "localhost")
+    POSTGRES_PORT_UWB = int(os.environ.get("POSTGRES_PORT_UWB", 5432))
+    POSTGRES_DB_UWB = os.environ.get("POSTGRES_DB_UWB", "uwb_database_name")
+    POSTGRES_USER_UWB = os.environ.get("POSTGRES_USER_UWB", "uwb_user")
+    POSTGRES_PASSWORD_UWB = os.environ.get("POSTGRES_PASSWORD_UWB", "uwb_password")
+    UWB_TABLE_NAME = os.environ.get("UWB_TABLE_NAME", "uwb_raw_data") # 실제 UWB 데이터 테이블명
+    UWB_DB_MAX_CONNECTIONS = int(os.environ.get("UWB_DB_MAX_CONNECTIONS", 3)) # 풀 최대 연결 수
 
     def __init__(self):
         self.rtsp_sources: dict[str, str] = self._parse_key_value_pairs(self.RTSP_SOURCES_STR)
