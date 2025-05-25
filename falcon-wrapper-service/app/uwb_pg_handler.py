@@ -5,6 +5,7 @@ from psycopg2.extras import DictCursor
 import logging
 import datetime # Python의 datetime 사용
 from typing import Optional, Dict, Any
+import threading
 
 # Falcon Wrapper 서비스의 config 모듈 임포트
 # from .config import app_config # 또는 실제 app_config 객체를 가져오는 방식에 맞게
@@ -12,43 +13,67 @@ from config import app_config # main.py에서 사용된 방식과 동일하게 �
 
 logger = logging.getLogger(__name__)
 
-pg_connection_pool_uwb = None
+pg_connection_pool_uwb: Optional[psycopg2.pool.SimpleConnectionPool] = None # 타입 힌트 명시
+_pool_lock = threading.Lock()
 
-def init_uwb_pg_pool():
+def init_uwb_pg_pool(force_reinit: bool = False) -> Optional[psycopg2.pool.SimpleConnectionPool]:
     """PostgreSQL 연결 풀을 UWB 데이터베이스용으로 초기화합니다."""
     global pg_connection_pool_uwb
-    if pg_connection_pool_uwb:
-        logger.debug("UWB PostgreSQL connection pool already initialized.")
-        return
 
-    # app_config에 UWB용 PostgreSQL 설정이 있는지 확인
-    required_pg_vars = [
-        'POSTGRES_HOST_UWB', 'POSTGRES_PORT_UWB', 'POSTGRES_DB_UWB',
-        'POSTGRES_USER_UWB', 'POSTGRES_PASSWORD_UWB', 'UWB_TABLE_NAME'
-    ]
-    missing_vars = [var for var in required_pg_vars if not hasattr(app_config, var) or not getattr(app_config, var)]
-    if missing_vars:
-        logger.error(f"UWB PostgreSQL config missing in app_config: {', '.join(missing_vars)}. Cannot initialize pool.")
-        return
+    # 멱등성 가드 (force_reinit가 True가 아니면 이미 초기화된 풀 반환)
+    if pg_connection_pool_uwb and not force_reinit:
+        logger.debug("UWB PostgreSQL connection pool already initialized and available.")
+        return pg_connection_pool_uwb
 
-    try:
-        logger.info(f"Initializing PostgreSQL connection pool for UWB on "
-                    f"{app_config.POSTGRES_HOST_UWB}:{app_config.POSTGRES_PORT_UWB}, DB: {app_config.POSTGRES_DB_UWB}")
-        pg_connection_pool_uwb = psycopg2.pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=getattr(app_config, 'UWB_DB_MAX_CONNECTIONS', 3),
-            user=app_config.POSTGRES_USER_UWB,
-            password=app_config.POSTGRES_PASSWORD_UWB,
-            host=app_config.POSTGRES_HOST_UWB,
-            port=int(app_config.POSTGRES_PORT_UWB), # 포트는 정수여야 함
-            database=app_config.POSTGRES_DB_UWB
-        )
-        conn = pg_connection_pool_uwb.getconn()
-        logger.info("PostgreSQL connection pool for UWB successfully initialized and tested.")
-        pg_connection_pool_uwb.putconn(conn)
-    except (Exception, psycopg2.Error) as error:
-        logger.error(f"Error while connecting to UWB PostgreSQL or initializing pool: {error}", exc_info=True)
-        pg_connection_pool_uwb = None
+    with _pool_lock: # 스레드 동시 접근 방지
+        # Lock 획득 후 다시 한번 확인 (더블 체킹 락킹 유사 패턴)
+        if pg_connection_pool_uwb and not force_reinit:
+            logger.debug("UWB PostgreSQL connection pool (checked inside lock) already initialized.")
+            return pg_connection_pool_uwb
+
+        logger.info(f"Attempting to initialize UWB PostgreSQL connection pool (force_reinit={force_reinit}). Current pool: {pg_connection_pool_uwb}")
+
+        # 필수 설정 변수 확인
+        required_pg_vars = [
+            'POSTGRES_HOST_UWB', 'POSTGRES_PORT_UWB', 'POSTGRES_DB_UWB',
+            'POSTGRES_USER_UWB', 'POSTGRES_PASSWORD_UWB', 'UWB_TABLE_NAME'
+        ]
+        missing_vars = [var for var in required_pg_vars if not hasattr(app_config, var) or not getattr(app_config, var)]
+        if missing_vars:
+            logger.error(f"UWB PostgreSQL config missing in app_config: {', '.join(missing_vars)}. Cannot initialize pool.")
+            pg_connection_pool_uwb = None # 명시적으로 None 설정
+            return None
+
+        temp_pool = None # 임시 풀 변수
+        try:
+            logger.info(f"Creating new PostgreSQL connection pool for UWB on "
+                        f"{app_config.POSTGRES_HOST_UWB}:{app_config.POSTGRES_PORT_UWB}, DB: {app_config.POSTGRES_DB_UWB}")
+            temp_pool = psycopg2.pool.SimpleConnectionPool(
+                minconn=1,
+                maxconn=getattr(app_config, 'UWB_DB_MAX_CONNECTIONS', 3),
+                user=app_config.POSTGRES_USER_UWB,
+                password=app_config.POSTGRES_PASSWORD_UWB,
+                host=app_config.POSTGRES_HOST_UWB,
+                port=int(app_config.POSTGRES_PORT_UWB),
+                database=app_config.POSTGRES_DB_UWB,
+                connect_timeout=5 # 연결 타임아웃 추가 (예시)
+            )
+            # 풀 생성 후 즉시 테스트
+            conn = temp_pool.getconn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1") # 간단한 테스트 쿼리
+            temp_pool.putconn(conn)
+            
+            # 모든 것이 성공했을 때만 전역 변수에 할당
+            pg_connection_pool_uwb = temp_pool
+            logger.info(f"UWB PostgreSQL connection pool successfully initialized and tested. Pool object: {pg_connection_pool_uwb}, ID: {id(pg_connection_pool_uwb)}")
+        except Exception: # 모든 예외를 잡아서 스택 트레이스 포함 로깅
+            logger.exception("UWB PostgreSQL pool initialization failed.") # logger.exception 사용
+            if temp_pool: # 임시 풀이 생성되었다면 닫아줌
+                temp_pool.closeall()
+            pg_connection_pool_uwb = None # 실패 시 확실히 None으로 설정
+
+        return pg_connection_pool_uwb
 
 def get_uwb_pg_connection():
     """UWB PostgreSQL 연결 풀에서 연결을 가져옵니다."""
@@ -121,7 +146,6 @@ class UWBPostgresHandler:
                     SELECT 
                         x_position, 
                         y_position, 
-                        z_position, -- 필요하다면 z_position도 포함
                         raw_timestamp::TEXT AS uwb_timestamp 
                     FROM {self.uwb_table_name}
                     WHERE tag_id = %s AND raw_timestamp <= %s
@@ -144,7 +168,6 @@ class UWBPostgresHandler:
                 return {
                     "x_m": uwb_data_db.get("x_position"),
                     "y_m": uwb_data_db.get("y_position"),
-                    "z_m": uwb_data_db.get("z_position", 0.0), # z 없으면 0.0 또는 None
                     "timestamp_uwb_utc": uwb_data_db.get("uwb_timestamp"),
                     "quality": None # DB 스키마에 quality 정보가 있다면 추가
                 }

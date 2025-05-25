@@ -90,12 +90,20 @@ def load_unidepth_model():
 def preprocess_image_for_yolo(image_np):
     return image_np
 
-def preprocess_image_for_unidepth(image_np, target_size=(384, 384)):
+def preprocess_image_for_unidepth(image_np, target_height=364, target_width=644): # 기본값 사용
+    logger.debug(f"Preprocessing image for UniDepth. Original shape: {image_np.shape}, Target HxW: {target_height}x{target_width}")
     img_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-    img_resized = cv2.resize(img_rgb, target_size, interpolation=cv2.INTER_AREA)
+    
+    # 💡 cv2.resize에는 (너비, 높이) 순서로 전달
+    # 새로운 매개변수명을 사용하여 (target_width, target_height) 튜플을 만듭니다.
+    dsize = (target_width, target_height) 
+    img_resized = cv2.resize(img_rgb, dsize, interpolation=cv2.INTER_AREA)
+    
+    logger.debug(f"Resized image shape for UniDepth: {img_resized.shape}")
     img_normalized = img_resized.astype(np.float32) / 255.0
-    img_chw = np.transpose(img_normalized, (2, 0, 1))
-    img_nchw = np.expand_dims(img_chw, axis=0)
+    img_chw = np.transpose(img_normalized, (2, 0, 1))  # HWC to CHW
+    img_nchw = np.expand_dims(img_chw, axis=0)      # Add batch dimension: NCHW
+    logger.debug(f"Final preprocessed shape for UniDepth: {img_nchw.shape}")
     return img_nchw
 
 def run_yolo_inference(image_np):
@@ -186,16 +194,16 @@ def consume_messages():
                     try: # 개별 메시지 처리에 대한 try-except
                         fused_data = message.value
                         if not isinstance(fused_data, dict):
-                            logger.warning(f"Skipping message, not a valid JSON object: {fused_data}")
+                            logger.warning(f"Skipping message, not a valid JSON object: Received type: {type(fused_data)}")
                             continue
 
                         camera_id = fused_data.get("camera_id")
-                        image_base64 = fused_data.get("image_base64") 
-                        original_timestamp_str = fused_data.get("timestamp_camera_utc") 
+                        image_base64 = fused_data.get("image_data_b64") 
+                        original_timestamp_str = fused_data.get("image_timestamp_utc") 
                         uwb_data_from_wrapper = fused_data.get("uwb_data") 
 
                         if not camera_id or not image_base64 or not original_timestamp_str:
-                            logger.warning(f"Skipping message, missing required fields (camera_id, image_base64, timestamp_camera_utc): {fused_data}")
+                            logger.warning(f"Skipping message, missing required fields (camera_id, image_data_b64, image_timestamp_utc):")
                             continue
 
                         img_bytes = base64.b64decode(image_base64)
@@ -209,7 +217,7 @@ def consume_messages():
                         detections = run_yolo_inference(yolo_input_img)
                         logger.info(f"[{camera_id}] YOLO detected {len(detections)} objects.")
 
-                        unidepth_input_img_nchw = preprocess_image_for_unidepth(img_np_bgr, target_size=(384,384))
+                        unidepth_input_img_nchw = preprocess_image_for_unidepth(img_np_bgr)
                         depth_map_hw = run_unidepth_inference(unidepth_input_img_nchw)
                         
                         person_locations = [] 

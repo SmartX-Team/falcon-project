@@ -27,8 +27,10 @@ try:
     from kafka_image_reader import KafkaImageSubscriber
     from uwb_handler import UWBHandler as APIUWBHandler
     # uwb_pg_handler에서 pg_connection_pool_uwb 변수도 가져오도록 수정 (manage_sources에서 사용)
-    from uwb_pg_handler import UWBPostgresHandler, init_uwb_pg_pool, close_uwb_pg_pool, pg_connection_pool_uwb 
+    import uwb_pg_handler
+    #from uwb_pg_handler import UWBPostgresHandler, init_uwb_pg_pool, close_uwb_pg_pool, pg_connection_pool_uwb 
     from frame_processor import FrameProcessor
+
 except ImportError as e:
     logger.fatal(f"Failed to import necessary modules: {e}. Service exiting.", exc_info=True)
     import sys
@@ -185,14 +187,28 @@ def load_sources_from_redis() -> dict:
 
 def manage_sources(current_sources_config: dict):
     global active_source_threads, active_uwb_handlers, processing_queue, uwb_handlers_lock
-    # uwb_pg_handler.pg_connection_pool_uwb를 직접 사용하거나, 
-    # init_uwb_pg_pool()이 설정하는 전역 변수를 정확히 참조해야 합니다.
+
     # 여기서는 uwb_pg_handler.pg_connection_pool_uwb를 사용한다고 가정 (import 필요)
     # 또는, UWBPostgresHandler 생성자에서 풀 가용성을 내부적으로 확인하도록 수정.
     # 현재 코드는 from uwb_pg_handler import pg_connection_pool_uwb 를 가정하고 있음.
 
-    logger.info(f"Managing sources. Current config has {len(current_sources_config)} sources. "
-                f"Active threads: {len(active_source_threads)}, Active UWB handlers: {len(active_uwb_handlers)}")
+    logger.debug(
+        "[SourceManagerThread in manage_sources] Current pool obj from module: %s, id: %s, type: %s",
+        uwb_pg_handler.pg_connection_pool_uwb,
+        id(uwb_pg_handler.pg_connection_pool_uwb),
+        type(uwb_pg_handler.pg_connection_pool_uwb),
+    )
+
+    if uwb_pg_handler.pg_connection_pool_uwb is None:
+        logger.warning("[SourceManagerThread in manage_sources] UWB pool is None, attempting to re-initialize.")
+        uwb_pg_handler.init_uwb_pg_pool() # uwb_pg_handler 모듈의 함수 호출
+        # 재시도 후 다시 상태 로깅
+        logger.debug(
+            "[SourceManagerThread in manage_sources after re-init attempt] Pool obj: %s, id: %s, type: %s",
+            uwb_pg_handler.pg_connection_pool_uwb,
+            id(uwb_pg_handler.pg_connection_pool_uwb),
+            type(uwb_pg_handler.pg_connection_pool_uwb),
+        )
 
     latest_source_ids = set(current_sources_config.keys())
     current_active_ids = set(active_source_threads.keys())
@@ -230,8 +246,8 @@ def manage_sources(current_sources_config: dict):
             if config_item.get("uwb_tag_id"):
                 if config_item["uwb_handler_type"] == "postgresql":
                     # uwb_pg_handler.pg_connection_pool_uwb 가 초기화되었는지 확인
-                    if pg_connection_pool_uwb: 
-                        uwb_handler = UWBPostgresHandler(camera_id=source_id, tag_id_for_camera=config_item["uwb_tag_id"])
+                    if uwb_pg_handler.pg_connection_pool_uwb: 
+                        uwb_handler = uwb_pg_handler.UWBPostgresHandler(camera_id=source_id, tag_id_for_camera=config_item["uwb_tag_id"])
                     else:
                         logger.error(f"PostgreSQL UWB pool (uwb_pg_handler.pg_connection_pool_uwb) not available. Cannot create UWBPostgresHandler for '{source_id}'.")
                 elif config_item["uwb_handler_type"] == "api":
@@ -363,7 +379,7 @@ def shutdown_service(signum=None, frame=None):
     logger.info("Falcon Wrapper Service shutdown sequence complete.")
 
 def main():
-    global processing_queue, pg_connection_pool_uwb # pg_connection_pool_uwb를 global로 선언
+    global processing_queue
     
     logger.info(f"Starting Falcon Wrapper Service (Instance ID: {getattr(app_config, 'WRAPPER_INSTANCE_ID', 'N/A')})...")
 
@@ -372,11 +388,11 @@ def main():
         logger.fatal("TARGET_SERVICE_NAME is not configured. This wrapper service needs to know which service configuration to load from Redis. Exiting.")
         return
 
-    init_uwb_pg_pool() 
+    uwb_pg_handler.init_uwb_pg_pool() 
     # init_uwb_pg_pool()이 uwb_pg_handler.pg_connection_pool_uwb를 설정한다고 가정
     # 또는, init_uwb_pg_pool()의 반환값을 받아 pg_connection_pool_uwb에 할당할 수 있음.
     # 여기서는 uwb_pg_handler에서 pg_connection_pool_uwb를 import 했다고 가정.
-    atexit.register(close_uwb_pg_pool)
+    atexit.register(uwb_pg_handler.close_uwb_pg_pool)
     
     if not get_redis_client():
         logger.fatal("Failed to initialize Redis client. Service cannot start dynamically loading configs. Exiting.")
