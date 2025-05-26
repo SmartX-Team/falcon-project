@@ -36,8 +36,8 @@ UNIDEPTH_MODEL_PATH = os.path.join(MODEL_DIR, 'unidepth_v2-384x384.onnx')
 
 ORT_PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
-X_CORRECTION_LEFT_THRESHOLD = float(os.environ.get('X_CORRECTION_LEFT_THRESHOLD', 170.0))
-X_CORRECTION_RIGHT_THRESHOLD = float(os.environ.get('X_CORRECTION_RIGHT_THRESHOLD', 470.0))
+X_CORRECTION_LEFT_THRESHOLD = float(os.environ.get('X_CORRECTION_LEFT_THRESHOLD', 384.0))
+X_CORRECTION_RIGHT_THRESHOLD = float(os.environ.get('X_CORRECTION_RIGHT_THRESHOLD', 1536.0))
 X_CORRECTION_OFFSET = float(os.environ.get('X_CORRECTION_OFFSET', 1.0)) 
 DEPTH_OFFSET_FACTOR = float(os.environ.get('DEPTH_OFFSET_FACTOR', -1.0)) 
 
@@ -63,13 +63,31 @@ KAFKA_RETRIES_CONFIG = int(os.environ.get("KAFKA_PRODUCER_RETRIES", "5"))
 def load_yolo_model():
     global yolo_model
     try:
-        model = YOLO(YOLO_MODEL_PATH) 
+        logger.info(f"Attempting to load YOLOv5 model from: {YOLO_MODEL_PATH}")
+        model = YOLO(YOLO_MODEL_PATH)
         if torch.cuda.is_available():
             logger.info("YOLO model will attempt to use GPU.")
         else:
             logger.info("YOLO model will use CPU.")
         yolo_model = model
         logger.info(f"YOLOv5 model loaded successfully from {YOLO_MODEL_PATH}")
+
+        # --- 💡💡💡 클래스 이름 로깅 추가 지점 시작 💡💡💡 ---
+        if yolo_model and hasattr(yolo_model, 'names'):
+            logger.info(f"YOLO model class names (ID: Name): {yolo_model.names}")
+            # 또는 좀 더 보기 편하게 ID와 이름을 한 줄씩 출력하려면:
+            # logger.info("--- YOLO Model Class Names (ID: Name) ---")
+            # for class_id, class_name_str in yolo_model.names.items():
+            #     logger.info(f"ID: {class_id}, Name: {class_name_str}")
+            # logger.info("-----------------------------------------")
+            if 'person' in yolo_model.names.values():
+                logger.info("The 'person' class IS PRESENT in the loaded YOLO model's names.")
+            else:
+                logger.warning("The 'person' class IS MISSING from the loaded YOLO model's names.")
+        else:
+            logger.warning("Could not retrieve class names from the loaded YOLO model (model or names attribute not found).")
+        # --- 💡💡💡 클래스 이름 로깅 추가 지점 끝 💡💡💡 ---
+
     except Exception as e:
         logger.error(f"Error loading YOLOv5 model: {e}", exc_info=True)
         yolo_model = None
@@ -114,11 +132,17 @@ def run_yolo_inference(image_np):
         results = yolo_model.predict(source=image_np, verbose=False) 
         detections = []
         if results and results[0].boxes:
+            logger.info(f"YOLO raw detection count: {len(results[0].boxes)}")
             for box in results[0].boxes:
                 xyxy = box.xyxy[0].cpu().numpy().tolist()
                 conf = float(box.conf[0].cpu().numpy())
                 cls_id = int(box.cls[0].cpu().numpy())
                 cls_name = yolo_model.names[cls_id]
+
+                 # 'person' 클래스에 대한 추가적인 로깅
+                if cls_name == 'person':
+                    logger.info(f"'person' detected with confidence: {conf:.4f}. Box: {xyxy}")
+
                 detections.append({
                     "box_xyxy": xyxy,
                     "confidence": conf,
@@ -136,9 +160,15 @@ def run_unidepth_inference(image_np_nchw):
         return None
     try:
         input_name = unidepth_session.get_inputs()[0].name
-        depth_map_onnx = unidepth_session.run(None, {input_name: image_np_nchw})[0]
-        depth_map_hw = np.squeeze(depth_map_onnx)
-        return depth_map_hw
+        #depth_map_onnx = unidepth_session.run(None, {input_name: image_np_nchw})[0]
+        outputs     = unidepth_session.run(None, {input_name: image_np_nchw})
+
+        depth_map   = np.squeeze(outputs[1])  
+        K_matrix    = outputs[0] 
+        logger.debug(f"UniDepth outputs — K:{K_matrix.shape}, depth:{depth_map.shape}")
+        #depth_map_hw = np.squeeze(depth_map_onnx)
+        return depth_map
+
     except Exception as e:
         logger.error(f"Error during UniDepth inference: {e}", exc_info=True)
         return None
@@ -187,7 +217,7 @@ def consume_messages():
                 for message in consumer: # consumer_timeout_ms 동안 블록
                     if stop_event.is_set():
                         break # 외부 종료 신호 감지 시 루프 탈출
-                    
+                    current_process_start_time = time.monotonic()
                     logger.debug(f"Received message: {message.topic}, partition={message.partition}, offset={message.offset}")
                     
                     # --- 개별 메시지 처리 로직 ---
@@ -202,9 +232,16 @@ def consume_messages():
                         original_timestamp_str = fused_data.get("image_timestamp_utc") 
                         uwb_data_from_wrapper = fused_data.get("uwb_data") 
 
-                        if not camera_id or not image_base64 or not original_timestamp_str:
-                            logger.warning(f"Skipping message, missing required fields (camera_id, image_data_b64, image_timestamp_utc):")
+                        missing_fields = []
+                        if not camera_id: missing_fields.append(f"camera_id(value:{camera_id})")
+                        if not image_base64: missing_fields.append(f"image_base64(status:{'None or Empty' if not image_base64 else 'Present'})")
+                        if not original_timestamp_str: missing_fields.append(f"image_timestamp_utc(value:{original_timestamp_str})")
+
+                        if missing_fields: 
+                            logger.warning(f"[{camera_id if camera_id else 'UnknownCam'}] [MISSING_FIELDS_SKIP] Skipping message. Missing/invalid fields: {'; '.join(missing_fields)}")
                             continue
+
+                        logger.debug(f"[{camera_id}] All required fields present. Processing message.")
 
                         img_bytes = base64.b64decode(image_base64)
                         img_np_bgr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
@@ -216,85 +253,130 @@ def consume_messages():
                         yolo_input_img = preprocess_image_for_yolo(img_np_bgr)
                         detections = run_yolo_inference(yolo_input_img)
                         logger.info(f"[{camera_id}] YOLO detected {len(detections)} objects.")
-
+                        num_persons_detected_yolo = sum(1 for d in detections if d['class_name'] == 'person')
                         unidepth_input_img_nchw = preprocess_image_for_unidepth(img_np_bgr)
                         depth_map_hw = run_unidepth_inference(unidepth_input_img_nchw)
                         
                         person_locations = [] 
-
+                        num_persons_located = len(person_locations)
                         if depth_map_hw is not None:
-                            logger.info(f"[{camera_id}] UniDepth estimation successful. Depth map shape: {depth_map_hw.shape}")
+                            logger.info(f"[{camera_id}] UniDepth estimation successful. Original depth map shape: {depth_map_hw.shape}")
                             
-                            base_uwb_x, base_uwb_y, base_uwb_tag_id = None, None, None
-                            if isinstance(uwb_data_from_wrapper, dict):
-                                base_uwb_x = uwb_data_from_wrapper.get('x_m') 
-                                base_uwb_y = uwb_data_from_wrapper.get('y_m')
-                                base_uwb_tag_id = uwb_data_from_wrapper.get('tag_id') 
-                                if base_uwb_x is None or base_uwb_y is None:
-                                    logger.warning(f"[{camera_id}] UWB data from wrapper is missing 'x_m' or 'y_m'. Location calculation might be inaccurate. UWB data: {uwb_data_from_wrapper}")
-                            else:
-                                logger.warning(f"[{camera_id}] UWB data from wrapper is not a dictionary or is missing. Location calculation will be skipped or use defaults. UWB data: {uwb_data_from_wrapper}")
+                            # --- 💡 변경/추가 지점 시작 (깊이맵 업샘플링) ---
+                            depth_map_full_resolution = None # 업샘플링된 깊이맵을 저장할 변수
+                            try:
+                                orig_h, orig_w = img_np_bgr.shape[:2] # 원본 이미지의 높이, 너비
+                                # cv2.resize는 (너비, 높이) 순서로 인자를 받습니다.
+                                depth_map_full_resolution = cv2.resize(depth_map_hw, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC) # 또는 cv2.INTER_LINEAR
+                                logger.debug(f"[{camera_id}] Upsampled depth map to original resolution: {depth_map_full_resolution.shape}")
+                            except Exception as e_resize:
+                                logger.error(f"[{camera_id}] Error upsampling depth map: {e_resize}", exc_info=True)
+                                # 업샘플링 실패 시 depth_map_full_resolution는 None으로 유지됩니다.
+                            # --- 💡 변경/추가 지점 끝 (깊이맵 업샘플링) ---
 
-                            for detection in detections:
-                                if detection['class_name'] == 'person': 
-                                    box = detection['box_xyxy']
-                                    xmin, ymin, xmax, ymax = box[0], box[1], box[2], box[3]
-                                    cx = (xmin + xmax) / 2
-                                    cy = (ymin + ymax) / 2
+                            # 업샘플링된 깊이맵이 유효할 때만 다음 로직 진행
+                            if depth_map_full_resolution is not None:
+                                base_uwb_x, base_uwb_y, base_uwb_tag_id = None, None, None
+                                if uwb_data_from_wrapper is None:
+                                    logger.debug(f"[{camera_id}] [UWB_IS_NULL] UWB data from wrapper is null.")
+                                elif isinstance(uwb_data_from_wrapper, dict):
+                                    base_uwb_x = uwb_data_from_wrapper.get('x_m') 
+                                    base_uwb_y = uwb_data_from_wrapper.get('y_m')
+                                    base_uwb_tag_id = uwb_data_from_wrapper.get('tag_id') 
+                                    if base_uwb_x is None or base_uwb_y is None:
+                                        logger.warning(f"[{camera_id}] [UWB_MISSING_XY] UWB data from wrapper is missing 'x_m' or 'y_m'. UWB data: {format_data_for_logging(uwb_data_from_wrapper)}") # format_data_for_logging 함수 필요
+                                else:
+                                    logger.warning(f"[{camera_id}] [UWB_INVALID_TYPE] UWB data from wrapper is not a dictionary or null. Type: {type(uwb_data_from_wrapper)}. Data preview: {format_data_for_logging(uwb_data_from_wrapper)}")
 
-                                    depth_h, depth_w = depth_map_hw.shape
-                                    if 0 <= int(cy) < depth_h and 0 <= int(cx) < depth_w:
-                                        depth_value = depth_map_hw[int(cy), int(cx)] + DEPTH_OFFSET_FACTOR 
-                                    else:
-                                        logger.warning(f"[{camera_id}] Person center ({cx},{cy}) out of depth map bounds ({depth_w},{depth_h}). Skipping depth for this person.")
-                                        depth_value = None 
 
-                                    calculated_x, calculated_y = None, None
-                                    if base_uwb_x is not None and base_uwb_y is not None and depth_value is not None:
-                                        calculated_x = float(base_uwb_x)
-                                        if cx < X_CORRECTION_LEFT_THRESHOLD:
-                                            calculated_x -= X_CORRECTION_OFFSET
-                                        elif cx > X_CORRECTION_RIGHT_THRESHOLD:
-                                            calculated_x += X_CORRECTION_OFFSET
+                                for detection in detections:
+                                    if detection['class_name'] == 'person': 
+                                        box = detection['box_xyxy']
+                                        xmin, ymin, xmax, ymax = box[0], box[1], box[2], box[3]
+                                        cx = (xmin + xmax) / 2
+                                        cy = (ymin + ymax) / 2
+
+                                        depth_value = None # 초기화
+                                        # 💡 변경/추가 지점: 업샘플링된 깊이맵(depth_map_full_resolution)에서 깊이 값 가져오기
+                                        # 좌표 범위 검사도 원본 이미지 크기(orig_h, orig_w) 기준
+                                        if 0 <= int(cy) < orig_h and 0 <= int(cx) < orig_w:
+                                            depth_value = depth_map_full_resolution[int(cy), int(cx)] + DEPTH_OFFSET_FACTOR 
+                                        else:
+                                            logger.warning(f"[{camera_id}] Person center ({cx:.2f},{cy:.2f}) out of upsampled depth map bounds ({orig_w},{orig_h}). Skipping depth for this person.")
                                         
-                                        calculated_y = float(base_uwb_y) + float(depth_value)
-                                        
-                                        person_locations.append({
-                                            "person_id": f"person_{len(person_locations)+1}", 
-                                            "box_xyxy": box,
-                                            "confidence": detection['confidence'],
-                                            "center_image_coord": (round(cx,2), round(cy,2)),
-                                            "depth_value_at_center": round(depth_value,3) if depth_value is not None else None,
-                                            "estimated_world_x": round(calculated_x,3) if calculated_x is not None else None,
-                                            "estimated_world_y": round(calculated_y,3) if calculated_y is not None else None,
-                                            "base_uwb_used": {"tag_id": base_uwb_tag_id, "x": base_uwb_x, "y": base_uwb_y} if base_uwb_x is not None else None
-                                        })
-                                    else:
-                                         logger.warning(f"[{camera_id}] Skipping location calculation for a person due to missing UWB base or depth. UWB: {base_uwb_x},{base_uwb_y} Depth: {depth_value}")
-                        else:
+                                        # 💡 디버그 로그 추가
+                                        logger.debug(f"[{camera_id}] Upsampled depth map shape: {depth_map_full_resolution.shape}, Person center in original image: ({cx:.2f}, {cy:.2f}), Calculated depth_value: {depth_value}")
+
+                                        calculated_x, calculated_y = None, None
+                                        if base_uwb_x is not None and base_uwb_y is not None and depth_value is not None:
+                                            # ... (위치 계산 로직은 기존과 동일) ...
+                                            calculated_x = float(base_uwb_x)
+                                            if cx < X_CORRECTION_LEFT_THRESHOLD: # 원본 이미지 기준 cx 사용
+                                                calculated_x -= X_CORRECTION_OFFSET
+                                            elif cx > X_CORRECTION_RIGHT_THRESHOLD: # 원본 이미지 기준 cx 사용
+                                                calculated_x += X_CORRECTION_OFFSET
+                                            calculated_y = float(base_uwb_y) + float(depth_value)
+                                            
+                                            person_locations.append({
+                                                "person_id": f"person_{len(person_locations)+1}", 
+                                                "box_xyxy": [round(coord, 2) for coord in box],
+                                                "confidence": round(detection['confidence'], 4),
+                                                "center_image_coord": (round(cx,2), round(cy,2)),
+                                                "depth_value_at_center": round(depth_value,3) if depth_value is not None else None,
+                                                "estimated_world_x": round(calculated_x,3) if calculated_x is not None else None,
+                                                "estimated_world_y": round(calculated_y,3) if calculated_y is not None else None,
+                                                "base_uwb_used": {"tag_id": base_uwb_tag_id, "x": base_uwb_x, "y": base_uwb_y}
+                                            })
+                                        else:
+                                            logger.debug(f"[{camera_id}] [LOC_CALC_SKIP] Skipping location calculation for person (box: {[round(c,1) for c in box]}). UWB_X: {base_uwb_x}, UWB_Y: {base_uwb_y}, Depth: {depth_value}")
+                            else: # depth_map_full_resolution is None (업샘플링 실패 시)
+                                logger.warning(f"[{camera_id}] Depth map upsampling failed. Cannot calculate person locations.")
+                        else: # depth_map_hw is None (UniDepth 추론 실패 또는 모델 미로드)
                             logger.warning(f"[{camera_id}] UniDepth estimation failed or model not loaded. Cannot calculate person locations.")
 
+                        # --- 최종 출력 메시지 생성 ---
+                        # (이 부분은 이전 답변의 상세화된 로그 요약 버전 사용 권장)
                         inference_output = {
                             "camera_id": camera_id,
-                            "timestamp_camera_utc": original_timestamp_str,
+                            "image_timestamp_utc": original_timestamp_str,
                             "timestamp_inference_utc": datetime.now(timezone.utc).isoformat(),
                             "uwb_data_received": uwb_data_from_wrapper, 
                             "detections_yolo": detections, 
                             "person_locations_estimated": person_locations 
                         }
-                        log_output_summary = {k: (v if not isinstance(v, list) or len(v) < 3 else f"{len(v)} items") for k,v in inference_output.items()}
+                        
+                        log_summary_keys = ["camera_id", "image_timestamp_utc", "detections_yolo", "person_locations_estimated"]
+                        log_output_summary = {
+                            k: (f"{len(v)} items" if isinstance(v, list) else v) 
+                            for k, v in inference_output.items() if k in log_summary_keys
+                        }
+                        log_output_summary["processing_time_ms"] = round((time.monotonic() - current_process_start_time) * 1000, 2)
                         logger.info(f"[{camera_id}] Inference Complete. Output Summary: {json.dumps(log_output_summary)}")
+
+                        log_output_summary["yolo_total_detections"] = len(detections)
+                        log_output_summary["yolo_persons_detected"] = num_persons_detected_yolo
+                        log_output_summary["persons_located_final"] = num_persons_located
+                        log_output_summary["unidepth_map_shape_raw"] = depth_map_hw.shape if depth_map_hw is not None else "N/A"
+
+                        log_output_summary["processing_time_ms"] = round((time.monotonic() - current_process_start_time) * 1000, 2)
+                        logger.info(f"[{camera_id}] Inference Complete. Output Summary: {json.dumps(log_output_summary)}")
+
 
                         if kafka_producer_instance:
                             try:
-                                kafka_producer_instance.send(OUTPUT_TOPIC_INFERENCE, value=inference_output)
-                                logger.debug(f"[{camera_id}] Sent inference results to Kafka topic '{OUTPUT_TOPIC_INFERENCE}'.")
-                            except KafkaError as ke:
-                                logger.error(f"[{camera_id}] Failed to send inference results to Kafka: {ke}", exc_info=True)
-                            except Exception as e_prod:
-                                logger.error(f"[{camera_id}] Unexpected error sending to Kafka: {e_prod}", exc_info=True)
+                                future = kafka_producer_instance.send(OUTPUT_TOPIC_INFERENCE, value=inference_output)
+                                future.get(timeout=5) 
+                                logger.debug(f"[{camera_id}] Successfully sent inference result to Kafka topic '{OUTPUT_TOPIC_INFERENCE}'.")
+                            except KafkaError as ke_prod:
+                                logger.error(f"[{camera_id}] Failed to send message to Kafka topic '{OUTPUT_TOPIC_INFERENCE}': {ke_prod}", exc_info=True)
+                            except Exception as e_send:
+                                logger.error(f"[{camera_id}] An unexpected error occurred while sending message to Kafka: {e_send}", exc_info=True)
+                        else:
+                            logger.warning(f"[{camera_id}] Kafka producer is not available. Skipping message sending for output topic {OUTPUT_TOPIC_INFERENCE}.")
 
-                    except Exception as e_proc: # 개별 메시지 처리 중 오류 발생 시
+
+
+                    except Exception as e_proc:
                         logger.error(f"Error processing message for camera_id '{camera_id if 'camera_id' in locals() else 'unknown'}': {e_proc}", exc_info=True)
                 
                 # consumer_timeout_ms가 만료되면 for 루프가 자연스럽게 종료되고,
