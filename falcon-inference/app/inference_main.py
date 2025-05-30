@@ -46,7 +46,7 @@ CAMERA_YAW_DEGREES = float(os.environ.get('CAMERA_YAW_DEGREES', 0.0))  # 카메�
 CAMERA_DEGREE_RESERVED = float(os.environ.get('CAMERA_DEGREE_RESERVED', 0.0))  # 향후 확장용
 
 # 보정 계수 추가
-DEPTH_SCALING_FACTOR = float(os.environ.get('DEPTH_SCALING_FACTOR', 0.2))  # 깊이값 스케일링
+DEPTH_SCALING_FACTOR = float(os.environ.get('DEPTH_SCALING_FACTOR', 0.9))  # 깊이값 스케일링
 LATERAL_SCALING_FACTOR = float(os.environ.get('LATERAL_SCALING_FACTOR', 0.3))  # 좌우 오프셋 스케일링
 
 CAMERA_HORIZONTAL_FOV_DEGREES = float(os.environ.get('CAMERA_HORIZONTAL_FOV_DEGREES', 77.0))  # 수평 FOV (degree)
@@ -58,7 +58,15 @@ UWB_SPACE_X_MAX = float(os.environ.get('UWB_SPACE_X_MAX', 34.29))   # 오른쪽 
 UWB_SPACE_Y_MIN = float(os.environ.get('UWB_SPACE_Y_MIN', 7.29))    # 위쪽(북쪽) 경계
 UWB_SPACE_Y_MAX = float(os.environ.get('UWB_SPACE_Y_MAX', 34.0))    # 아래쪽(남쪽) 경계
 
+# 환경변수 추가 (기존 환경변수 섹션에 추가)
+INFERENCE_MAX_FPS = float(os.environ.get('INFERENCE_MAX_FPS', '3.0'))  # 기본값: 초당 2프레임
+INFERENCE_SKIP_STRATEGY = os.environ.get('INFERENCE_SKIP_STRATEGY', 'DROP_OLD').upper()  # DROP_OLD 또는 THROTTLE
 
+# 전역 변수 추가 (기존 전역 변수 섹션에 추가)
+last_inference_time_by_camera = {}  # 카메라별 마지막 인퍼런스 시간 추적
+inference_interval = 1.0 / INFERENCE_MAX_FPS if INFERENCE_MAX_FPS > 0 else 0
+message_consume_count = 0  # 소비한 메시지 수 (디버깅용)
+inference_perform_count = 0  # 실제 수행한 인퍼런스 수 (디버깅용)
 # --- 전역 변수 ---
 stop_event = threading.Event()
 yolo_model = None
@@ -75,6 +83,33 @@ else:
         logger.warning(f"Invalid KAFKA_PRODUCER_ACKS value '{KAFKA_PRODUCER_ACKS_ENV}'. Defaulting to 1.")
         KAFKA_ACKS_CONFIG = 1
 KAFKA_RETRIES_CONFIG = int(os.environ.get("KAFKA_PRODUCER_RETRIES", "5"))
+
+
+
+def should_process_inference(camera_id, current_time):
+    """
+    인퍼런스를 수행할지 결정하는 함수
+    
+    Args:
+        camera_id: 카메라 ID
+        current_time: 현재 시간 (time.monotonic())
+    
+    Returns:
+        bool: 인퍼런스를 수행할지 여부
+    """
+    global last_inference_time_by_camera
+    
+    if INFERENCE_MAX_FPS <= 0:
+        return True  # 제한 없음
+    
+    last_time = last_inference_time_by_camera.get(camera_id, 0)
+    time_elapsed = current_time - last_time
+    
+    if time_elapsed >= inference_interval:
+        last_inference_time_by_camera[camera_id] = current_time
+        return True
+    else:
+        return False
 
 
 def calculate_position_with_yaw_and_fov(base_uwb_x, base_uwb_y, depth_value, cx, cy, image_width, image_height, yaw_degrees, horizontal_fov_degrees):
@@ -157,28 +192,30 @@ def load_yolo_model():
     try:
         logger.info(f"Attempting to load YOLOv5 model from: {YOLO_MODEL_PATH}")
         model = YOLO(YOLO_MODEL_PATH)
+
         if torch.cuda.is_available():
             logger.info("YOLO model will attempt to use GPU.")
+            # CUDA 최적화 설정
+            #model.model.half()  # FP16 사용
+            model.model.cuda()
+            
         else:
             logger.info("YOLO model will use CPU.")
+
+      
         yolo_model = model
         logger.info(f"YOLOv5 model loaded successfully from {YOLO_MODEL_PATH}")
 
-        # --- 💡💡💡 클래스 이름 로깅 추가 지점 시작 💡💡💡 ---
+        # ---클래스 이름 로깅 추가 지점 시작 ---
         if yolo_model and hasattr(yolo_model, 'names'):
             logger.info(f"YOLO model class names (ID: Name): {yolo_model.names}")
-            # 또는 좀 더 보기 편하게 ID와 이름을 한 줄씩 출력하려면:
-            # logger.info("--- YOLO Model Class Names (ID: Name) ---")
-            # for class_id, class_name_str in yolo_model.names.items():
-            #     logger.info(f"ID: {class_id}, Name: {class_name_str}")
-            # logger.info("-----------------------------------------")
             if 'person' in yolo_model.names.values():
                 logger.info("The 'person' class IS PRESENT in the loaded YOLO model's names.")
             else:
                 logger.warning("The 'person' class IS MISSING from the loaded YOLO model's names.")
         else:
             logger.warning("Could not retrieve class names from the loaded YOLO model (model or names attribute not found).")
-        # --- 💡💡💡 클래스 이름 로깅 추가 지점 끝 💡💡💡 ---
+        # --- 클래스 이름 로깅 추가 지점 끝 ---
 
     except Exception as e:
         logger.error(f"Error loading YOLOv5 model: {e}", exc_info=True)
@@ -188,7 +225,35 @@ def load_unidepth_model():
     global unidepth_session
     try:
         sess_options = ort.SessionOptions()
-        unidepth_session = ort.InferenceSession(UNIDEPTH_MODEL_PATH, sess_options=sess_options, providers=ORT_PROVIDERS)
+
+        #성능 최적화 옵션들
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        # 🎯 Provider 순서 최적화 (TensorRT 우선) -> TensorRT 잘 동작하는거 확인했는데, 대신 K8S 에서 캐쉬 잘 저장하고 불러오는지 체크 필요
+        providers = [
+            #('TensorrtExecutionProvider', {
+            #    'trt_max_workspace_size': 4 * 1024 * 1024 * 1024,  # 4GB
+            #    'trt_fp16_enable': True,  # Mixed precision
+            #    'trt_engine_cache_enable': True,
+            #    'trt_engine_cache_path': '/tmp/trt_cache',
+            #    'trt_timing_cache_enable': True,
+            #}),            
+            ('CUDAExecutionProvider', {
+                'device_id': 0,
+                'arena_extend_strategy': 'kSameAsRequested',
+                'gpu_mem_limit': 8 * 1024 * 1024 * 1024,  # 8GB
+                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+            }),
+            'CPUExecutionProvider'
+        ]
+        
+        unidepth_session = ort.InferenceSession(
+            UNIDEPTH_MODEL_PATH, 
+            sess_options=sess_options, 
+            providers=providers
+        )
+
+
         logger.info(f"UniDepthV2 ONNX model loaded successfully from {UNIDEPTH_MODEL_PATH} using providers: {unidepth_session.get_providers()}")
         if "CUDAExecutionProvider" not in unidepth_session.get_providers():
             logger.warning("UniDepthV2: CUDAExecutionProvider not available or not used. Check ONNXRuntime-GPU installation and CUDA setup.")
@@ -360,6 +425,14 @@ def consume_messages():
                             continue
 
                         logger.debug(f"[{camera_id}] All required fields present. Processing message.")
+
+                        should_infer = should_process_inference(camera_id, current_process_start_time)
+
+                        if not should_infer:
+                                # 메시지는 소비했지만 인퍼런스는 스킵
+                            logger.debug(f"[{camera_id}] [RATE_LIMITED] Message consumed but inference skipped (FPS limit: {INFERENCE_MAX_FPS})")
+                            continue
+
 
                         img_bytes = base64.b64decode(image_base64)
                         img_np_bgr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)

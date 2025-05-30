@@ -30,6 +30,14 @@ RUN apt-get update && \
     apt-get update && \
     # cuDNN 9 for CUDA 12 설치
     apt-get install -y --no-install-recommends cudnn9-cuda-12 && \
+    # TensorRT 설치 (정상적으로 빌드 및 성능 향상은 확인했는데 K8S 환경에서 아직 테스트를 못해봤기에 다시 주석처리해둠 필요시 해제해서 다시 설치하삼)
+    #apt-get install -y --no-install-recommends \
+    #    tensorrt \
+    #    libnvinfer8 \
+    #    libnvinfer-plugin8 \
+    #    libnvonnxparsers8 \
+    #    libnvparsers8 \
+    #    python3-libnvinfer && \
     # 정리
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

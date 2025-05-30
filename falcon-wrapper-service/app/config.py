@@ -79,7 +79,12 @@ class AppConfig:
     POSTGRES_PASSWORD_UWB: Optional[str] = os.environ.get("POSTGRES_PASSWORD_UWB", "uwb_password") # docker run에서는 netAi007! 사용
     UWB_TABLE_NAME: str = os.environ.get("UWB_TABLE_NAME", "uwb_raw_data") # docker run에서는 uwb_raw 사용
     UWB_DB_MAX_CONNECTIONS: int = int(os.environ.get("UWB_DB_MAX_CONNECTIONS", 3)) # docker run에서는 5 사용
+    # === 송신 FPS 제한 관련 설정 ===
+    SEND_MAX_FPS = float(os.environ.get('SEND_MAX_FPS', '3.0'))  # 기본값: 초당 3프레임
+    SEND_SKIP_STRATEGY = os.environ.get('SEND_SKIP_STRATEGY', 'DROP_OLD').upper()  # DROP_OLD 또는 THROTTLE
 
+    DEFAULT_CAMERA_YAW_DEGREES = float(os.environ.get('DEFAULT_CAMERA_YAW_DEGREES', '0.0'))
+    DEFAULT_CAMERA_HORIZONTAL_FOV_DEGREES = float(os.environ.get('DEFAULT_CAMERA_HORIZONTAL_FOV_DEGREES', '77.0'))
     def __init__(self):
         # 정적 소스 설정 파싱
         self.rtsp_sources: Dict[str, str] = self._parse_key_value_pairs(self.RTSP_SOURCES_STR)
