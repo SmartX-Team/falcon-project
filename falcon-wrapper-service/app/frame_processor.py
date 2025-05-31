@@ -40,6 +40,19 @@ class FrameProcessor(threading.Thread):
         self._stop_event = threading.Event()
         self.daemon = True # main 스레드 종료 시 자동 종료되도록
         self.producer = None
+        # ✨ FPS 제한 기능 추가
+        self.send_max_fps = getattr(self.config, 'SEND_MAX_FPS', 3.0)
+        self.send_skip_strategy = getattr(self.config, 'SEND_SKIP_STRATEGY', 'DROP_OLD').upper()
+        self.last_send_time_by_camera = {}  # 카메라별 마지막 송신 시간 추적
+        self.send_interval = 1.0 / self.send_max_fps if self.send_max_fps > 0 else 0
+
+        # 통계 변수 추가
+        self.frames_received = 0
+        self.frames_sent = 0
+        self.frames_dropped = 0
+        self.last_stats_time = time.monotonic()
+        self.stats_interval = getattr(self.config, 'STATS_LOG_INTERVAL_SEC', 30.0)  # 30초마다 통계 출력
+
         self._initialize_producer()
         logger.info(f"FrameProcessor {self.name} initialized. Outputting to topic '{self.output_topic}'.")
 
@@ -59,6 +72,50 @@ class FrameProcessor(threading.Thread):
         except Exception as e_init:
             logger.fatal(f"FrameProcessor {self.name}: Unexpected error initializing Kafka Producer: {e_init}. This worker will not function.", exc_info=True)
             self.producer = None
+
+    def should_send_frame(self, camera_id: str, current_time: float) -> bool:
+        """
+        프레임을 인퍼런스 서비스로 송신할지 결정
+        
+        Args:
+            camera_id: 카메라 ID
+            current_time: 현재 시간 (time.monotonic())
+        
+        Returns:
+            bool: 송신할지 여부
+        """
+        if self.send_max_fps <= 0:
+            return True  # 제한 없음
+        
+        last_time = self.last_send_time_by_camera.get(camera_id, 0)
+        time_elapsed = current_time - last_time
+        
+        if time_elapsed >= self.send_interval:
+            self.last_send_time_by_camera[camera_id] = current_time
+            return True
+        else:
+            return False
+
+    def log_stats_if_needed(self, current_time: float):
+        """주기적으로 통계 출력"""
+        if current_time - self.last_stats_time >= self.stats_interval:
+            time_elapsed = current_time - self.last_stats_time
+            
+            if time_elapsed > 0:
+                receive_rate = self.frames_received / time_elapsed
+                send_rate = self.frames_sent / time_elapsed
+                drop_rate = self.frames_dropped / time_elapsed
+                drop_ratio = (self.frames_dropped / max(self.frames_received, 1)) * 100
+                
+                logger.info(f"[{self.name}] STATS - Receive: {receive_rate:.1f} fps, "
+                           f"Send: {send_rate:.1f} fps, Drop: {drop_rate:.1f} fps, "
+                           f"Drop ratio: {drop_ratio:.1f}%")
+            
+            # 통계 리셋
+            self.frames_received = 0
+            self.frames_sent = 0
+            self.frames_dropped = 0
+            self.last_stats_time = current_time
 
     def stop(self):
         logger.info(f"FrameProcessor {self.name} stop request received.")
@@ -83,12 +140,37 @@ class FrameProcessor(threading.Thread):
                 time.sleep(0.1)
                 continue
 
+            current_time = time.monotonic()
+            self.frames_received += 1
+
             camera_id, image_bgr, frame_timestamp_utc, source_type, source_details = item
             
             if not isinstance(frame_timestamp_utc, datetime):
                 logger.error(f"[{camera_id}] Invalid frame_timestamp_utc type: {type(frame_timestamp_utc)}. Expected datetime. Skipping item.")
                 self.processing_queue.task_done()
+                self.frames_dropped += 1
                 continue
+            
+            # 🎯 핵심: 송신 FPS 제한 체크
+            should_send = self.should_send_frame(camera_id, current_time)
+            
+            if not should_send:
+                if self.send_skip_strategy == 'DROP_OLD':
+                    logger.debug(f"[{camera_id}] [SEND_RATE_LIMITED] Dropping frame due to send FPS limit ({self.send_max_fps} FPS)")
+                    self.processing_queue.task_done()
+                    self.frames_dropped += 1
+                    self.log_stats_if_needed(current_time)
+                    continue  # 현재 프레임 스킵
+                elif self.send_skip_strategy == 'THROTTLE':
+                    # 다음 송신까지 대기
+                    last_time = self.last_send_time_by_camera.get(camera_id, 0)
+                    wait_time = self.send_interval - (current_time - last_time)
+                    if wait_time > 0:
+                        logger.debug(f"[{camera_id}] [SEND_THROTTLE] Waiting {wait_time:.3f}s to maintain send FPS limit")
+                        time.sleep(wait_time)
+                    self.last_send_time_by_camera[camera_id] = time.monotonic()
+
+            logger.debug(f"[{camera_id}] Processing and sending frame (send rate: {self.send_max_fps} FPS)")
 
             try:
                 uwb_handler = None
