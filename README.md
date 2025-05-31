@@ -1,87 +1,133 @@
-# falcon-project
-25년도 트윈 환경에 맞춰 구조를 최적화한 Falcon Project
+# Falcon Project 2025
+Architecture Optimization for Digital Twin Environment
 
+## Overview
 
-Falcon 프로젝트 (2025 트윈 환경 최적화)
-본 문서는 2025년 디지털 트윈 환경 운영을 목표로 기존 Falcon 프로젝트의 아키텍처를 개선하고 최적한 Falcon Project 결과물을 정리하고 있습니다.
-핵심 변경 사항은 클라우드 네이티브하게 카메라 스트리밍과 AI 추론 로직을 분리하여 확장성, 유연성 및 GPU 사용 효율성을 높혔습니다.
+This document outlines the Falcon Project results, which has been architecturally improved and optimized for digital twin environment operations in 2025. The core enhancement involves cloud-native separation of camera streaming and AI inference logic to increase scalability, flexibility, and GPU utilization efficiency.
 
-### 1. 기존 Falcon 컨테이너 방식의 한계점
+## 1. Limitations of the Original Falcon Container Approach
 
-https://github.com/NetAiFalcon/falcon
-조민준 , 김철희 학부생 인턴분들이 작업해주신 Falcon Project 는
-컨테이너 기반으로 프로젝트의 초기 목표는 성공적으로 달성하였으나
+The original Falcon Project (https://github.com/NetAiFalcon/falcon), developed by undergraduate interns Minjun Jo and Cheolhee Kim, successfully achieved its initial project goals in a container-based approach. However, it had the following major limitations:
 
-다음과 같은 주요 한계점을 가지고 있었습니다:
+### Physical Constraints
+- Camera devices and GPU equipment for AI inference had to be physically connected and deployed on the same host machine
+- This constraint limited efficient processing of cameras located at various locations through centralized or distributed GPU clusters
 
-* 물리적 제약: 카메라 장치와 AI 추론을 위한 GPU 장비가 반드시 동일한 호스트 머신에 물리적으로 연결되어 배포 및 운영되어야 했습니다. 이는 다양한 위치에 있는 카메라들을 중앙 집중식 또는 분산된 GPU 클러스터에서 효율적으로 처리하는 데 제약이 되었습니다.
+### Single Container Multiple Responsibilities
+- One container handled multiple major functions: camera capture, AI inference (YOLOv5, UniDepthV2, etc.), and result data transmission
+- This reduced flexibility and stability, as scaling or updating specific functions or handling failures affected the entire system
 
-* 단일 컨테이너의 다중 책임: 하나의 컨테이너가 카메라 캡처, AI 추론 (YOLOv5, UniDepthV2 등), 결과 데이터 전송 등 여러 주요 기능을 모두 담당했습니다. 이로 인해 특정 기능의 확장이나 업데이트, 장애 발생 시 전체 시스템에 영향을 미치는 등 유연성과 안정성이 저하되었습니다.
+### Service Scalability Constraints
+- To process multiple camera streams by deploying multiple Falcon containers, physical host machines equipped with GPU resources equal to the number of instances were required, limiting scalability
 
-* 서비스 확장성 제약: 여러 카메라 스트림을 처리하기 위해 다수의 Falcon 컨테이너 배포하기 위해서는 인스턴스 수 만큼 GPU 자원을 장착한 물리적인 호스트 머신이 필요하여 확장성에 제약이 있음
+## 2. Target Architecture: Distributed Streaming and Cloud-Based Inference
 
-### 2. 목표 아키텍처: 분산 스트리밍 및 클라우드 기반 추론
-이러한 한계를 극복하기 위해, 본 Repo에서는 다음과 같이 스트리밍과 추론 기능을 명확히 분리하고, 연구실 자체 Kubernetes 클러스터(클라우드 기반 인프라)를 활용하는 개선된 아키텍처는 아래와 같습니다.
+To overcome these limitations, this repository presents an improved architecture that clearly separates streaming and inference functions and utilizes our lab's own Kubernetes cluster (cloud-based infrastructure).
 
 ![Falcon-25year](https://github.com/user-attachments/assets/b935ab3d-04b4-4502-a843-07c5b47852aa)
 
+### Camera Agent (Container, utilizing existing developed agents)
 
+**Repository Reference**: https://github.com/SmartX-Team/camera-agent.git
 
-#### Camera Agent (컨테이너, 기존 개발된 Agent 활용):
+#### Input
+- Local camera devices (/dev/video* and other actual hardware cameras)
+- ROS2 image topic subscription (real Husky/Isaac Sim virtual cameras, etc.)
+- Supports RTSP/Kafka video streaming
 
-해당 Repo 참조: https://github.com/SmartX-Team/camera-agent.git
+#### Processing
+- **Image/Video Data Acquisition**: Captures raw video/image data from input sources
+- **Image/Video Compression**: 
+  - H.264 compression for RTSP streaming
+  - JPEG compression for Kafka transmission
+- **Payload Construction**: Creates JSON payloads containing compressed data or metadata
 
-입력: 로컬 카메라 장치 (/dev/video* 등 실제 하드웨어 카메라) 또는 ROS2 이미지 토픽 구독 (현실 허스키/Isaac Sim 내 가상 카메라 등)으로 RTSP/ Kafka 영상 스트리밍을 지원
+#### Output
+- **RTSP Streaming**: Streams H.264-encoded video directly to Inference services or other RTSP clients via RTSP protocol
+- **Kafka Publishing**: Publishes (compressed) image data or video frame information as JSON to specific Kafka topics (e.g., `raw_video_frames`, `compressed_video_frames`)
 
-처리:
+#### Visibility Server Integration
+- **Registration**: Registers agent and managed camera details to Visibility server on startup (`/agent_register`)
+- **Status Updates**: Periodically updates actual data transmission status (RTSP streaming status, Kafka publishing status, etc.) to Visibility server (`/agent_update_status`)
 
-이미지/비디오 데이터 획득.
+#### Characteristics
+- Lightweight, GPU-free (minimal CPU usage for encoding)
+- Deployable near each camera source
+- Manages "one camera per agent" or a small number of cameras
 
-이미지/비디오 압축: H.264 (RTSP 스트리밍 시) 또는 JPEG (Kafka 전송 시 이미지 압축) 등 코덱으로 압축.
-압축된 데이터 또는 메타데이터를 포함한 JSON 페이로드 구성.
+### Inference Service (Kubernetes Cluster Container with GPU)
 
-출력:
+#### Input
+- **RTSP Subscription**: Subscribes to RTSP streams provided by Camera Agents to receive video frames (using OpenCV + FFmpeg, etc.)
+- **Kafka Subscription**: Subscribes to `video_frames` topics published by Camera Agents to receive image/video data
 
-RTSP 스트리밍: H.264 등으로 인코딩된 비디오를 RTSP 프로토콜을 통해 Inference 서비스 또는 다른 RTSP 클라이언트에 직접 스트리밍.
+#### Processing
+- **Data Decoding**: Decodes received data and reconstructs images
+- **AI Inference**: Performs object detection and depth inference using AI models (YOLOv5, UniDepthV2, etc.)
+- **GPU Optimization**: Efficiently uses GPU resources in Kubernetes environment (considers NVIDIA Triton Inference Server utilization)
+- **Performance Optimization**: Implements GPU usage optimization (FP16, TensorRT, etc.)
 
-Kafka 발행: (압축된) 이미지 데이터 또는 비디오 프레임 정보를 JSON 형태로 Kafka의 특정 토픽 (예: raw_video_frames, compressed_video_frames)으로 발행. 디지털 트윈 환경에서 직접 사용하거나, Inference 서비스가 이 토픽을 구독할 수도 있습니다.
+#### Output
+- Publishes inference results (object bounding boxes, classes, confidence scores, depth information, etc.) as JSON to specific Kafka topics (e.g., `inference_results`)
 
-Visibility 서버 연동:
+#### Scalability
+- Utilizes Kubernetes Horizontal Pod Autoscaler (HPA) to automatically scale instances up/down based on load
 
-시작 시 자신(Agent) 및 관리하는 카메라의 상세 정보를 Visibility 서버에 등록 (/agent_register).
+### Digital Twin / Real-time Visualization Environment (Consumer)
 
-주기적으로 자신의 실제 데이터 전송 상태(RTSP 스트리밍 상태, Kafka 발행 상태 등)를 Visibility 서버에 업데이트 (/agent_update_status).
+#### Function
+- Subscribes to `inference_results` topics (published by Inference services)
+- Real-time visualization of human positions estimated by Falcon
+- Integrates with digital twin environment for comprehensive spatial awareness
 
-특징: 경량화, GPU 불필요 (인코딩 시 CPU 약간 사용). 각 카메라 소스 가까이에 배포 가능. "Agent당 카메라 하나" 또는 소수 카메라 관리.
+## 3. Architecture Benefits
 
-### Inference 서비스 (Kubernetes 클러스터 내 컨테이너, GPU 사용):
+### Enhanced Scalability
+- **Independent Scaling**: Camera agents and inference services can be scaled independently based on demand
+- **Resource Optimization**: GPU resources are centralized and shared efficiently across multiple camera streams
+- **Geographic Distribution**: Camera agents can be deployed anywhere while leveraging centralized inference capabilities
 
-입력:
+### Improved Flexibility
+- **Technology Stack Independence**: Each component can use optimal technology stack without affecting others
+- **Deployment Flexibility**: Components can be deployed on different infrastructure types (edge devices, cloud, hybrid)
+- **Maintenance Isolation**: Updates or maintenance of one component don't affect others
 
-RTSP 구독: Camera Agent가 제공하는 RTSP 스트림을 구독하여 비디오 프레임 수신 (OpenCV + FFmpeg 등 사용).
+### Cost Efficiency
+- **Shared GPU Resources**: Multiple camera streams share GPU infrastructure, reducing overall hardware costs
+- **Dynamic Resource Allocation**: Resources are allocated based on actual demand rather than peak capacity
+- **Cloud-Native Benefits**: Leverages Kubernetes features for automatic scaling, load balancing, and fault tolerance
 
-(또는) Kafka 구독: Camera Agent가 Kafka로 발행한 video_frames 토픽을 구독하여 이미지/비디오 데이터 수신.
+## 4. Implementation Considerations
 
-처리:
+### Network Requirements
+- **Bandwidth Planning**: Ensure adequate network bandwidth for RTSP streaming or Kafka message throughput
+- **Latency Optimization**: Minimize network latency between camera agents and inference services
+- **Reliability**: Implement network redundancy and failure handling mechanisms
 
-수신된 데이터 디코딩 및 이미지 재구성.
+### Data Management
+- **Stream Quality**: Balance between image quality and network/processing efficiency
+- **Buffering Strategy**: Implement appropriate buffering mechanisms to handle network variations
+- **Data Persistence**: Consider data retention policies for debugging and analysis
 
-YOLOv5, UniDepthV2 등 AI 모델을 사용하여 객체 검출 및 깊이 추론 수행.
+### Security
+- **Authentication**: Implement proper authentication mechanisms for RTSP streams and Kafka topics
+- **Encryption**: Use TLS/SSL for data transmission security
+- **Access Control**: Implement role-based access control for different system components
 
-Kubernetes 환경의 GPU 자원을 효율적으로 사용 (예: NVIDIA Triton Inference Server 활용 고려). GPU 사용 최적화 (FP16, TensorRT 등).
+## 5. Future Enhancements
 
-출력: 추론 결과(객체 바운딩 박스, 클래스, 신뢰도, 깊이 정보 등)를 JSON 형태로 Kafka의 특정 토픽 (예: inference_results)으로 발행.
+### Edge AI Integration
+- Hybrid processing where simple inference can be done at the edge with complex processing in the cloud
+- Dynamic workload distribution based on network conditions and processing requirements
 
-확장성: Kubernetes의 Horizontal Pod Autoscaler (HPA) 등을 활용하여 부하에 따라 자동으로 인스턴스 수 확장/축소 가능.
+### Advanced Analytics
+- Integration with time-series databases for historical analysis
+- Machine learning pipeline for continuous model improvement
+- Real-time anomaly detection and alerting systems
 
-### 디지털 트윈 / 실시간 시각화 환경 (컨슈머):
+### Multi-Modal Sensor Fusion
+- Integration with other sensor types (LiDAR, thermal cameras, etc.)
+- Enhanced spatial understanding through sensor fusion algorithms
+- Improved accuracy through multi-modal data correlation
 
-inference_results 토픽 (Inference 서비스가 발행)을 카프카 토픽을 구독하여 Falcon이 추정한 사람 위치를  실시간으로 시각화.
-
-
-
-
-
-
-
-
+This architecture provides a robust, scalable, and flexible foundation for digital twin environments while maximizing resource utilization and operational efficiency.
